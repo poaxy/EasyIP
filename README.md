@@ -19,7 +19,7 @@ A powerful bash script for retrieving comprehensive information about IP address
 
 1. **Download the script**:
    ```bash
-   wget https://raw.githubusercontent.com/yourusername/easyip/main/easyip
+   wget https://raw.githubusercontent.com/poaxy/EasyIP/refs/heads/main/easyip
    ```
 
 2. **Make it executable**:
