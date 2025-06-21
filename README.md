@@ -1,5 +1,4 @@
 # EasyIp - Comprehensive Bash IP Information Lookup Tool
-
 ## Features
 
 - 🌐 **IP Geolocation**: Country, region, city, postal code, timezone
