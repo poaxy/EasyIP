@@ -1,0 +1,840 @@
+#!/bin/bash
+
+# easyip - Comprehensive IP Information Lookup Tool
+# Powered by IPinfo API
+# Version: 1.0.0
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m' # No Color
+
+# Script configuration
+SCRIPT_NAME="easyip"
+VERSION="1.0.0"
+CONFIG_DIR="$HOME/.config/easyip"
+CONFIG_FILE="$CONFIG_DIR/config"
+CACHE_DIR="$CONFIG_DIR/cache"
+API_BASE_URL="https://ipinfo.io"
+DEFAULT_TIMEOUT=10
+
+# Global variables
+API_KEY=""
+IP_ADDRESS=""
+OUTPUT_FORMAT="human"
+VERBOSE=false
+CACHE_ENABLED=true
+CACHE_DURATION=3600
+
+# Function to print colored output
+print_color() {
+    local color=$1
+    local message=$2
+    # Print to stderr for info/debug messages
+    echo -e "${color}${message}${NC}" >&2
+}
+
+# Function to print error messages
+print_error() {
+    print_color $RED "❌ Error: $1"
+}
+
+# Function to print success messages
+print_success() {
+    print_color $GREEN "✅ $1"
+}
+
+# Function to print info messages
+print_info() {
+    print_color $BLUE "ℹ️  $1"
+}
+
+# Function to print warning messages
+print_warning() {
+    print_color $YELLOW "⚠️  $1"
+}
+
+# Function to show version
+show_version() {
+    echo "$SCRIPT_NAME v$VERSION"
+    echo "Comprehensive IP Information Lookup Tool"
+    echo "Powered by IPinfo API"
+    exit 0
+}
+
+# Function to show help
+show_help() {
+    cat << EOF
+$SCRIPT_NAME v$VERSION - Comprehensive IP Information Lookup Tool
+
+USAGE:
+    $SCRIPT_NAME [OPTIONS] [IP_ADDRESS]
+
+ARGUMENTS:
+    IP_ADDRESS              IP address to lookup (default: current public IP)
+
+OPTIONS:
+    -h, --help              Show this help message
+    -v, --version           Show version information
+    -j, --json              Output in JSON format
+    -c, --compact           Output in compact format
+    -t, --table             Output in table format
+    -a, --all               Show all available information (requires API key)
+    -k, --api-key KEY       Use custom API key
+    --timeout SECONDS       Set request timeout (default: $DEFAULT_TIMEOUT)
+    --no-cache              Disable caching
+    --clear-cache           Clear cache directory
+    --config                Edit configuration file
+    --location-only         Show only location information
+    --network-only          Show only network information
+    --privacy-check         Focus on privacy detection
+    --coordinates           Show only coordinates
+    --map                   Open location in browser map
+    -f, --file FILE         Process multiple IPs from file
+    --csv                   Output results in CSV format
+    --save FILE             Save results to file
+    --verbose               Enable verbose output
+
+EXAMPLES:
+    $SCRIPT_NAME                    # Lookup current public IP
+    $SCRIPT_NAME 1.1.1.1           # Lookup specific IP
+    $SCRIPT_NAME 1.1.1.1 -j        # JSON output
+    $SCRIPT_NAME 1.1.1.1 -a        # Show all information (API key required)
+    $SCRIPT_NAME 1.1.1.1 --map     # Open location in map
+    $SCRIPT_NAME -f ips.txt        # Process multiple IPs
+    $SCRIPT_NAME --config          # Edit configuration
+
+CONFIGURATION:
+    Configuration file: $CONFIG_FILE
+    Cache directory: $CACHE_DIR
+
+EOF
+    exit 0
+}
+
+# Function to check dependencies
+check_dependencies() {
+    local missing_deps=()
+    
+    if ! command -v curl &> /dev/null; then
+        missing_deps+=("curl")
+    fi
+    
+    if ! command -v jq &> /dev/null; then
+        missing_deps+=("jq")
+    fi
+    
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        print_error "Missing required dependencies: ${missing_deps[*]}"
+        echo "Please install the missing packages:"
+        echo "  Ubuntu/Debian: sudo apt install ${missing_deps[*]}"
+        echo "  CentOS/RHEL: sudo yum install ${missing_deps[*]}"
+        echo "  Fedora: sudo dnf install ${missing_deps[*]}"
+        echo "  macOS: brew install ${missing_deps[*]}"
+        exit 1
+    fi
+}
+
+# Function to create configuration directory and files
+setup_config() {
+    if [ ! -d "$CONFIG_DIR" ]; then
+        mkdir -p "$CONFIG_DIR"
+        print_info "Created configuration directory: $CONFIG_DIR"
+    fi
+    
+    if [ ! -d "$CACHE_DIR" ]; then
+        mkdir -p "$CACHE_DIR"
+        print_info "Created cache directory: $CACHE_DIR"
+    fi
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" << EOF
+# easyip Configuration File
+# API_KEY=your_ipinfo_api_key_here
+DEFAULT_FORMAT=human
+CACHE_ENABLED=true
+CACHE_DURATION=3600
+TIMEOUT=$DEFAULT_TIMEOUT
+DEFAULT_BROWSER=firefox
+EOF
+        print_info "Created configuration file: $CONFIG_FILE"
+        print_warning "Please add your IPinfo API key to the configuration file"
+    fi
+}
+
+# Function to load configuration
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # Source the config file
+        source "$CONFIG_FILE"
+        
+        # Set default values if not defined
+        DEFAULT_FORMAT=${DEFAULT_FORMAT:-human}
+        CACHE_ENABLED=${CACHE_ENABLED:-true}
+        CACHE_DURATION=${CACHE_DURATION:-3600}
+        TIMEOUT=${TIMEOUT:-$DEFAULT_TIMEOUT}
+        DEFAULT_BROWSER=${DEFAULT_BROWSER:-firefox}
+        
+        # Set output format if not specified via command line
+        if [ "$OUTPUT_FORMAT" = "human" ] && [ "$DEFAULT_FORMAT" != "human" ]; then
+            OUTPUT_FORMAT="$DEFAULT_FORMAT"
+        fi
+    fi
+}
+
+# Function to get API key
+get_api_key() {
+    # Check command line argument first
+    if [ -n "$API_KEY" ]; then
+        return 0
+    fi
+    
+    # Check environment variable
+    if [ -n "${IPINFO_API_KEY:-}" ]; then
+        API_KEY="$IPINFO_API_KEY"
+        return 0
+    fi
+    
+    # Check configuration file
+    if [ -f "$CONFIG_FILE" ]; then
+        local config_key=$(grep "^API_KEY=" "$CONFIG_FILE" | cut -d'=' -f2-)
+        if [ -n "$config_key" ]; then
+            API_KEY="$config_key"
+            return 0
+        fi
+    fi
+    
+    # No API key found
+    return 1
+}
+
+# Function to validate IP address
+validate_ip() {
+    local ip=$1
+    
+    # Check if it's a valid IPv4 address
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        IFS='.' read -r -a octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    
+    # Check if it's a valid IPv6 address (basic check)
+    if [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to get cache file path
+get_cache_file() {
+    local ip=$1
+    echo "$CACHE_DIR/${ip}.json"
+}
+
+# Function to check if cache is valid
+is_cache_valid() {
+    local cache_file=$1
+    
+    if [ "$CACHE_ENABLED" != "true" ]; then
+        return 1
+    fi
+    
+    if [ ! -f "$cache_file" ]; then
+        return 1
+    fi
+    
+    local cache_age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0)))
+    if [ $cache_age -lt $CACHE_DURATION ]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to make API request
+make_api_request() {
+    local ip=$1
+    local url="$API_BASE_URL/$ip/json"
+    local cache_file=$(get_cache_file "$ip")
+    
+    # Check cache first
+    if is_cache_valid "$cache_file"; then
+        if [ "$VERBOSE" = true ]; then
+            print_info "Using cached data for $ip"
+        fi
+        cat "$cache_file"
+        return 0
+    fi
+    
+    # Prepare curl command
+    local curl_cmd="curl -s --max-time $TIMEOUT"
+    
+    # Add API key if available
+    if [ -n "$API_KEY" ]; then
+        curl_cmd="$curl_cmd -H 'Authorization: Bearer $API_KEY'"
+    fi
+    
+    curl_cmd="$curl_cmd '$url'"
+    
+    if [ "$VERBOSE" = true ]; then
+        print_info "Making API request to: $url"
+    fi
+    
+    # Make the request
+    local response
+    response=$(eval "$curl_cmd")
+    # Only output the response, no info messages
+    if [ -z "$response" ]; then
+        print_error "Empty response from API"
+        return 1
+    fi
+    # Check if response is valid JSON
+    if echo "$response" | jq empty 2>/dev/null; then
+        # Cache the response
+        if [ "$CACHE_ENABLED" = "true" ]; then
+            echo "$response" > "$cache_file"
+        fi
+        echo "$response"
+        return 0
+    else
+        print_error "Invalid JSON response from API"
+        return 1
+    fi
+}
+
+# Function to display human-readable output
+display_human() {
+    local data=$1
+    local ip=$(echo "$data" | jq -r '.ip // "N/A"')
+    
+    echo
+    print_color $CYAN "🌐 IP Information for $ip"
+    print_color $WHITE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Location information
+    local city=$(echo "$data" | jq -r '.city // "N/A"')
+    local region=$(echo "$data" | jq -r '.region // "N/A"')
+    local country=$(echo "$data" | jq -r '.country // "N/A"')
+    local postal=$(echo "$data" | jq -r '.postal // "N/A"')
+    local timezone=$(echo "$data" | jq -r '.timezone // "N/A"')
+    
+    if [ "$city" != "N/A" ] || [ "$region" != "N/A" ] || [ "$country" != "N/A" ]; then
+        print_color $GREEN "📍 Location:"
+        if [ "$city" != "N/A" ] && [ "$region" != "N/A" ]; then
+            echo "   $city, $region, $country"
+        elif [ "$city" != "N/A" ]; then
+            echo "   $city, $country"
+        else
+            echo "   $region, $country"
+        fi
+        
+        if [ "$postal" != "N/A" ]; then
+            echo "   📮 Postal: $postal"
+        fi
+        
+        if [ "$timezone" != "N/A" ]; then
+            echo "   🕐 Timezone: $timezone"
+        fi
+    fi
+    
+    # Network information
+    local hostname=$(echo "$data" | jq -r '.hostname // "N/A"')
+    local org=$(echo "$data" | jq -r '.org // "N/A"')
+    
+    if [ "$hostname" != "N/A" ] || [ "$org" != "N/A" ]; then
+        echo
+        print_color $BLUE "🏢 Network:"
+        if [ "$hostname" != "N/A" ]; then
+            echo "   🌐 Hostname: $hostname"
+        fi
+        if [ "$org" != "N/A" ]; then
+            echo "   🏢 Organization: $org"
+        fi
+    fi
+    
+    # Coordinates
+    local loc=$(echo "$data" | jq -r '.loc // "N/A"')
+    if [ "$loc" != "N/A" ]; then
+        echo
+        print_color $PURPLE "🗺️  Coordinates:"
+        echo "   📍 $loc"
+        echo "   🗺️  Map: https://maps.google.com/?q=$loc"
+    fi
+    
+    # Privacy information (if available)
+    local privacy=$(echo "$data" | jq -r '.privacy // empty')
+    if [ -n "$privacy" ]; then
+        echo
+        print_color $YELLOW "🔒 Privacy:"
+        local vpn=$(echo "$privacy" | jq -r '.vpn // "N/A"')
+        local proxy=$(echo "$privacy" | jq -r '.proxy // "N/A"')
+        local tor=$(echo "$privacy" | jq -r '.tor // "N/A"')
+        local hosting=$(echo "$privacy" | jq -r '.hosting // "N/A"')
+        
+        if [ "$vpn" != "N/A" ]; then
+            echo "   🛡️  VPN: $vpn"
+        fi
+        if [ "$proxy" != "N/A" ]; then
+            echo "   🔄 Proxy: $proxy"
+        fi
+        if [ "$tor" != "N/A" ]; then
+            echo "   🌐 Tor: $tor"
+        fi
+        if [ "$hosting" != "N/A" ]; then
+            echo "   🖥️  Hosting: $hosting"
+        fi
+    fi
+    
+    # Abuse contact (if available)
+    local abuse=$(echo "$data" | jq -r '.abuse // empty')
+    if [ -n "$abuse" ]; then
+        echo
+        print_color $RED "🚨 Abuse Contact:"
+        local email=$(echo "$abuse" | jq -r '.email // "N/A"')
+        local phone=$(echo "$abuse" | jq -r '.phone // "N/A"')
+        local address=$(echo "$abuse" | jq -r '.address // "N/A"')
+        
+        if [ "$email" != "N/A" ]; then
+            echo "   📧 Email: $email"
+        fi
+        if [ "$phone" != "N/A" ]; then
+            echo "   📞 Phone: $phone"
+        fi
+        if [ "$address" != "N/A" ]; then
+            echo "   📍 Address: $address"
+        fi
+    fi
+    
+    echo
+}
+
+# Function to display compact output
+display_compact() {
+    local data=$1
+    local ip=$(echo "$data" | jq -r '.ip // "N/A"')
+    local city=$(echo "$data" | jq -r '.city // "N/A"')
+    local region=$(echo "$data" | jq -r '.region // "N/A"')
+    local country=$(echo "$data" | jq -r '.country // "N/A"')
+    local org=$(echo "$data" | jq -r '.org // "N/A"')
+    local loc=$(echo "$data" | jq -r '.loc // "N/A"')
+    
+    echo "$ip | $city, $region, $country | $org | $loc"
+}
+
+# Function to display table output
+display_table() {
+    local data=$1
+    
+    echo
+    print_color $CYAN "IP Information Table"
+    print_color $WHITE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    echo "$data" | jq -r 'to_entries[] | "\(.key): \(.value)"' | while IFS=': ' read -r key value; do
+        if [ -n "$key" ] && [ "$value" != "null" ]; then
+            printf "%-15s %s\n" "$key" "$value"
+        fi
+    done
+    echo
+}
+
+# Function to open location in map
+open_map() {
+    local data=$1
+    local loc=$(echo "$data" | jq -r '.loc // empty')
+    
+    if [ -n "$loc" ]; then
+        local map_url="https://maps.google.com/?q=$loc"
+        print_info "Opening map in browser: $map_url"
+        
+        if command -v xdg-open &> /dev/null; then
+            xdg-open "$map_url"
+        elif command -v open &> /dev/null; then
+            open "$map_url"
+        elif command -v "$DEFAULT_BROWSER" &> /dev/null; then
+            "$DEFAULT_BROWSER" "$map_url"
+        else
+            print_warning "Could not open browser automatically"
+            echo "Please visit: $map_url"
+        fi
+    else
+        print_error "No coordinates available for mapping"
+    fi
+}
+
+# Function to clear cache
+clear_cache() {
+    if [ -d "$CACHE_DIR" ]; then
+        rm -rf "$CACHE_DIR"/*
+        print_success "Cache cleared"
+    else
+        print_info "No cache directory found"
+    fi
+}
+
+# Function to edit configuration
+edit_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        if command -v nano &> /dev/null; then
+            nano "$CONFIG_FILE"
+        elif command -v vim &> /dev/null; then
+            vim "$CONFIG_FILE"
+        elif command -v vi &> /dev/null; then
+            vi "$CONFIG_FILE"
+        else
+            print_error "No text editor found. Please edit manually: $CONFIG_FILE"
+        fi
+    else
+        print_error "Configuration file not found"
+    fi
+}
+
+# Function to display comprehensive information (API key required)
+display_comprehensive() {
+    local data=$1
+    local ip=$(echo "$data" | jq -r '.ip // "N/A"')
+    
+    echo
+    print_color $CYAN "🌐 Comprehensive IP Information for $ip"
+    print_color $WHITE "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Location information
+    local city=$(echo "$data" | jq -r '.city // "N/A"')
+    local region=$(echo "$data" | jq -r '.region // "N/A"')
+    local country=$(echo "$data" | jq -r '.country // "N/A"')
+    local postal=$(echo "$data" | jq -r '.postal // "N/A"')
+    local timezone=$(echo "$data" | jq -r '.timezone // "N/A"')
+    
+    if [ "$city" != "N/A" ] || [ "$region" != "N/A" ] || [ "$country" != "N/A" ]; then
+        print_color $GREEN "📍 Location:"
+        if [ "$city" != "N/A" ] && [ "$region" != "N/A" ]; then
+            echo "   $city, $region, $country"
+        elif [ "$city" != "N/A" ]; then
+            echo "   $city, $country"
+        else
+            echo "   $region, $country"
+        fi
+        
+        if [ "$postal" != "N/A" ]; then
+            echo "   📮 Postal: $postal"
+        fi
+        
+        if [ "$timezone" != "N/A" ]; then
+            echo "   🕐 Timezone: $timezone"
+        fi
+    fi
+    
+    # Network information
+    local hostname=$(echo "$data" | jq -r '.hostname // "N/A"')
+    local org=$(echo "$data" | jq -r '.org // "N/A"')
+    
+    if [ "$hostname" != "N/A" ] || [ "$org" != "N/A" ]; then
+        echo
+        print_color $BLUE "🏢 Network:"
+        if [ "$hostname" != "N/A" ]; then
+            echo "   🌐 Hostname: $hostname"
+        fi
+        if [ "$org" != "N/A" ]; then
+            echo "   🏢 Organization: $org"
+        fi
+    fi
+    
+    # Coordinates
+    local loc=$(echo "$data" | jq -r '.loc // "N/A"')
+    if [ "$loc" != "N/A" ]; then
+        echo
+        print_color $PURPLE "🗺️  Coordinates:"
+        echo "   📍 $loc"
+        echo "   🗺️  Map: https://maps.google.com/?q=$loc"
+    fi
+    
+    # Privacy information (API key required)
+    local privacy=$(echo "$data" | jq -r '.privacy // empty')
+    if [ -n "$privacy" ]; then
+        echo
+        print_color $YELLOW "🔒 Privacy & Security:"
+        local vpn=$(echo "$privacy" | jq -r '.vpn // "N/A"')
+        local proxy=$(echo "$privacy" | jq -r '.proxy // "N/A"')
+        local tor=$(echo "$privacy" | jq -r '.tor // "N/A"')
+        local hosting=$(echo "$privacy" | jq -r '.hosting // "N/A"')
+        local relay=$(echo "$privacy" | jq -r '.relay // "N/A"')
+        local service=$(echo "$privacy" | jq -r '.service // "N/A"')
+        
+        if [ "$vpn" != "N/A" ]; then
+            echo "   🛡️  VPN: $vpn"
+        fi
+        if [ "$proxy" != "N/A" ]; then
+            echo "   🔄 Proxy: $proxy"
+        fi
+        if [ "$tor" != "N/A" ]; then
+            echo "   🌐 Tor Exit Node: $tor"
+        fi
+        if [ "$hosting" != "N/A" ]; then
+            echo "   🖥️  Hosting Provider: $hosting"
+        fi
+        if [ "$relay" != "N/A" ]; then
+            echo "   🔗 Relay: $relay"
+        fi
+        if [ "$service" != "N/A" ]; then
+            echo "   ⚙️  Service: $service"
+        fi
+    else
+        echo
+        print_color $YELLOW "🔒 Privacy & Security:"
+        echo "   ℹ️  Privacy detection requires API key"
+    fi
+    
+    # Carrier information (API key required)
+    local carrier=$(echo "$data" | jq -r '.carrier // empty')
+    if [ -n "$carrier" ]; then
+        echo
+        print_color $CYAN "📱 Carrier Information:"
+        local name=$(echo "$carrier" | jq -r '.name // "N/A"')
+        local mcc=$(echo "$carrier" | jq -r '.mcc // "N/A"')
+        local mnc=$(echo "$carrier" | jq -r '.mnc // "N/A"')
+        
+        if [ "$name" != "N/A" ]; then
+            echo "   📱 Carrier: $name"
+        fi
+        if [ "$mcc" != "N/A" ] && [ "$mnc" != "N/A" ]; then
+            echo "   📶 MCC/MNC: $mcc-$mnc"
+        fi
+    else
+        echo
+        print_color $CYAN "📱 Carrier Information:"
+        echo "   ℹ️  Carrier info requires API key"
+    fi
+    
+    # Company information (API key required)
+    local company=$(echo "$data" | jq -r '.company // empty')
+    if [ -n "$company" ]; then
+        echo
+        print_color $GREEN "🏢 Company Information:"
+        local name=$(echo "$company" | jq -r '.name // "N/A"')
+        local domain=$(echo "$company" | jq -r '.domain // "N/A"')
+        local type=$(echo "$company" | jq -r '.type // "N/A"')
+        
+        if [ "$name" != "N/A" ]; then
+            echo "   🏢 Company: $name"
+        fi
+        if [ "$domain" != "N/A" ]; then
+            echo "   🌐 Domain: $domain"
+        fi
+        if [ "$type" != "N/A" ]; then
+            echo "   📋 Type: $type"
+        fi
+    else
+        echo
+        print_color $GREEN "🏢 Company Information:"
+        echo "   ℹ️  Company info requires API key"
+    fi
+    
+    # Abuse contact information (API key required)
+    local abuse=$(echo "$data" | jq -r '.abuse // empty')
+    if [ -n "$abuse" ]; then
+        echo
+        print_color $RED "🚨 Abuse Contact:"
+        local email=$(echo "$abuse" | jq -r '.email // "N/A"')
+        local phone=$(echo "$abuse" | jq -r '.phone // "N/A"')
+        local address=$(echo "$abuse" | jq -r '.address // "N/A"')
+        local country=$(echo "$abuse" | jq -r '.country // "N/A"')
+        
+        if [ "$email" != "N/A" ]; then
+            echo "   📧 Email: $email"
+        fi
+        if [ "$phone" != "N/A" ]; then
+            echo "   📞 Phone: $phone"
+        fi
+        if [ "$address" != "N/A" ]; then
+            echo "   📍 Address: $address"
+        fi
+        if [ "$country" != "N/A" ]; then
+            echo "   🌍 Country: $country"
+        fi
+    else
+        echo
+        print_color $RED "🚨 Abuse Contact:"
+        echo "   ℹ️  Abuse contact requires API key"
+    fi
+    
+    # Additional fields
+    local anycast=$(echo "$data" | jq -r '.anycast // empty')
+    local bogon=$(echo "$data" | jq -r '.bogon // empty')
+    local asn=$(echo "$data" | jq -r '.asn // empty')
+    
+    if [ -n "$anycast" ] || [ -n "$bogon" ] || [ -n "$asn" ]; then
+        echo
+        print_color $PURPLE "🔍 Additional Information:"
+        if [ -n "$anycast" ]; then
+            echo "   🌐 Anycast: $anycast"
+        fi
+        if [ -n "$bogon" ]; then
+            echo "   ⚠️  Bogon: $bogon"
+        fi
+        if [ -n "$asn" ]; then
+            echo "   🔗 ASN: $asn"
+        fi
+    fi
+    
+    echo
+}
+
+# Function to process single IP
+process_ip() {
+    local ip=$1
+    
+    # Validate IP if provided
+    if [ -n "$ip" ] && ! validate_ip "$ip"; then
+        print_error "Invalid IP address: $ip"
+        exit 1
+    fi
+    
+    # Check if --all was requested without API key first
+    if [ "$OUTPUT_FORMAT" = "all" ]; then
+        if ! get_api_key; then
+            print_error "--all option requires an API key"
+            print_info "Please add your API key to the configuration file"
+            exit 1
+        fi
+    fi
+    
+    # Get API key for other operations
+    if ! get_api_key; then
+        print_warning "No API key found. Using free tier (limited requests)"
+        print_info "To get an API key, visit: https://ipinfo.io/account"
+    fi
+    
+    # Make API request
+    local response
+    response=$(make_api_request "$ip")
+    if [ $? -ne 0 ] || [ -z "$response" ]; then
+        print_error "Failed to get IP information"
+        exit 1
+    fi
+    
+    # Display results based on format
+    case "$OUTPUT_FORMAT" in
+        "json")
+            echo "$response"
+            ;;
+        "compact")
+            display_compact "$response"
+            ;;
+        "table")
+            display_table "$response"
+            ;;
+        "all")
+            display_comprehensive "$response"
+            ;;
+        *)
+            display_human "$response"
+            ;;
+    esac
+}
+
+# Main function
+main() {
+    # Check dependencies
+    check_dependencies
+    
+    # Setup configuration
+    setup_config
+    
+    # Load configuration
+    load_config
+    
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                ;;
+            -v|--version)
+                show_version
+                ;;
+            -j|--json)
+                OUTPUT_FORMAT="json"
+                shift
+                ;;
+            -c|--compact)
+                OUTPUT_FORMAT="compact"
+                shift
+                ;;
+            -t|--table)
+                OUTPUT_FORMAT="table"
+                shift
+                ;;
+            -a|--all)
+                OUTPUT_FORMAT="all"
+                shift
+                ;;
+            -k|--api-key)
+                API_KEY="$2"
+                shift 2
+                ;;
+            --timeout)
+                TIMEOUT="$2"
+                shift 2
+                ;;
+            --no-cache)
+                CACHE_ENABLED=false
+                shift
+                ;;
+            --clear-cache)
+                clear_cache
+                exit 0
+                ;;
+            --config)
+                edit_config
+                exit 0
+                ;;
+            --map)
+                OPEN_MAP=true
+                shift
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -*)
+                print_error "Unknown option: $1"
+                show_help
+                ;;
+            *)
+                if [ -z "$IP_ADDRESS" ]; then
+                    IP_ADDRESS="$1"
+                else
+                    print_error "Multiple IP addresses not supported yet"
+                    exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Process the IP
+    process_ip "$IP_ADDRESS"
+    
+    # Open map if requested
+    if [ "${OPEN_MAP:-false}" = true ]; then
+        local response
+        if response=$(make_api_request "$IP_ADDRESS"); then
+            open_map "$response"
+        fi
+    fi
+}
+
+# Run main function with all arguments
+main "$@" 
