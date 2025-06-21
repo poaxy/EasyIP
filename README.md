@@ -1,4 +1,4 @@
-# easyip - Comprehensive IP Information Lookup Tool
+# EasyIp - Comprehensive Bash IP Information Lookup Tool
 
 A powerful bash script for retrieving comprehensive information about IP addresses using the IPinfo API.
 
